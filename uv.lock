@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 conflicts = [[
     { package = "quantum-nematode", extra = "cpu" },
@@ -1983,8 +1983,11 @@ version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "pre-commit" },
+    { name = "pygame" },
     { name = "pyright" },
+    { name = "qiskit-aer" },
     { name = "ruff" },
+    { name = "torch" },
 ]
 
 [package.optional-dependencies]
@@ -2015,13 +2018,16 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pre-commit", specifier = ">=4.5.1" },
+    { name = "pygame", specifier = ">=2.6.1" },
     { name = "pyright", specifier = ">=1.1.408" },
+    { name = "qiskit-aer", specifier = ">=0.17.2" },
     { name = "quantum-nematode", extras = ["cpu"], marker = "extra == 'cpu'", editable = "packages/quantum-nematode" },
     { name = "quantum-nematode", extras = ["gpu"], marker = "extra == 'gpu'", editable = "packages/quantum-nematode" },
     { name = "quantum-nematode", extras = ["pixel"], marker = "extra == 'pixel'", editable = "packages/quantum-nematode" },
     { name = "quantum-nematode", extras = ["qpu"], marker = "extra == 'qpu'", editable = "packages/quantum-nematode" },
     { name = "quantum-nematode", extras = ["torch"], marker = "extra == 'torch'", editable = "packages/quantum-nematode" },
     { name = "ruff", specifier = ">=0.15.1" },
+    { name = "torch", specifier = ">=2.9.0" },
 ]
 provides-extras = ["cpu", "gpu", "torch", "qpu", "pixel"]
 

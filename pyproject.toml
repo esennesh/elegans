@@ -29,8 +29,11 @@ classifiers = [
 ]
 dependencies = [
     "pre-commit>=4.5.1",
+    "pygame>=2.6.1",
     "pyright>=1.1.408",
+    "qiskit-aer>=0.17.2",
     "ruff>=0.15.1",
+    "torch>=2.9.0",
 ]
 
 [project.urls]
