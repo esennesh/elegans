@@ -3,6 +3,7 @@
 __all__ = [
     "MIN_GRID_SIZE",
     "BaseEnvironment",
+    "CurvatureNavigationParams",
     "Direction",
     "DynamicForagingEnvironment",
     "ForagingParams",
@@ -18,6 +19,7 @@ __all__ = [
 from elegans.env.env import (
     MIN_GRID_SIZE,
     BaseEnvironment,
+    CurvatureNavigationParams,
     Direction,
     DynamicForagingEnvironment,
     ForagingParams,

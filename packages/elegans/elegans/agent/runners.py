@@ -568,11 +568,16 @@ class StandardEpisodeRunner(EpisodeRunner):
 
         for _ in range(max_steps):
             logger.debug("--- New Step ---")
-            gradient_strength, gradient_direction = agent.env.get_state(agent.path[-1])
+            gradient_strength, gradient_direction = agent.env.get_navigation_state(agent.path[-1])
 
             # Track if agent stays in same position
             current_position = tuple(agent.env.agent_pos)
-            if current_position == previous_position:
+            if current_position == previous_position and agent.env.speed_pause_occurred:
+                # Fractional-speed gating is intended locomotion, not a stuck
+                # policy action or collision. Preserve prior collision history
+                # without incrementing it for this intentional pause.
+                pass
+            elif current_position == previous_position:
                 stuck_position_count += 1
             else:
                 stuck_position_count = 0
@@ -824,7 +829,7 @@ class ManyworldsEpisodeRunner(EpisodeRunner):
             total_superpositions = len(superpositions)
             i = 0
             for brain_copy, env_copy, path_copy in superpositions:
-                gradient_strength, gradient_direction = env_copy.get_state(path_copy[-1])
+                gradient_strength, gradient_direction = env_copy.get_navigation_state(path_copy[-1])
                 reward = agent.calculate_reward(
                     reward_config,
                     env_copy,
@@ -837,6 +842,7 @@ class ManyworldsEpisodeRunner(EpisodeRunner):
                 params = agent._create_brain_params(
                     gradient_strength,
                     gradient_direction,
+                    env=env_copy,
                 )
                 actions = brain_copy.run_brain(
                     params=params,

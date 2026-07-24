@@ -81,7 +81,11 @@ class RewardCalculator:
         reward += distance_reward + exploration_bonus
 
         # Anti-dithering: penalize if agent oscillates (returns to previous cell)
-        if len(path) > 2 and env.agent_pos == path[-3]:  # noqa: PLR2004
+        if (
+            len(path) > 2  # noqa: PLR2004
+            and env.agent_pos == path[-3]
+            and getattr(env, "speed_pause_occurred", False) is not True
+        ):
             anti_dither_penalty = self.config.penalty_anti_dithering
             reward -= anti_dither_penalty
             logger.debug(

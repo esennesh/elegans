@@ -103,17 +103,37 @@ docker-compose exec elegans uv run ./scripts/run_simulation.py --log-level DEBUG
 docker-compose exec elegans bash
 ```
 
-### 4. Run the Minimal Curvature Taxis Demo
+### 4. Run the Curvature-aware Odor Navigation Demo
 
-This deterministic demo uses no brain or learning. A point agent moves forward through one smooth
-odor field and bends using only the concentration difference between left and right sensors.
+This deterministic demo uses no learning. A point agent navigates a smooth, non-Gaussian,
+non-circular odor field using nine local concentration samples. It reconstructs the local odor
+gradient and Hessian, estimates how the uphill odor streamlines bend, and continuously slows in
+high-curvature regions while moving faster in low-curvature regions. Motor turn rate, sensed field
+curvature, and realized path curvature are logged as separate quantities.
 
 ```bash
-uv run python scripts/run_curvature_taxis_demo.py
+uv run python scripts/run_curvature_taxis_demo.py --video
 ```
 
-The command writes a four-panel trajectory/distance/concentration/curvature figure, complete CSV
-transition logs, a 20-heading comparison, and a JSON summary to `exports/curvature_taxis/`.
+The command writes a six-panel diagnostic figure, a 1280-by-720 H.264 animation, complete aligned
+sensor-transition CSV logs, a 20-heading adaptive-versus-matched-speed comparison, and a JSON
+summary to `exports/curvature_taxis/`. See the
+[curvature-navigation study](docs/research/curvature_navigation/README.md) for the equations,
+interpretation guide, simulator port, and experiment plan.
+MP4 rendering requires FFmpeg; omit `--video` to generate the other artifacts without it.
+
+To enable the same curvature estimator and speed law in the main discrete *C. elegans* foraging
+simulator, run:
+
+```bash
+uv run scripts/run_simulation.py \
+  --config configs/examples/curvature_aware_foraging.yml
+```
+
+The example reconstructs its food-gradient steering signal from the same local odor stencil and
+adds signed curvature plus estimator confidence to the MLP policy input. The simulator feature is
+opt-in; existing configurations retain their original two-input policy and one-cell-per-action
+movement exactly.
 
 ### 5. Run the Sensorimotor-Influence Toy Study
 

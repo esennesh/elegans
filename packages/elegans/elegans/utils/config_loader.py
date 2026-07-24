@@ -28,6 +28,7 @@ from elegans.env.env import (
     DEFAULT_DISCOMFORT_PENALTY,
     DEFAULT_LETHAL_HP_DAMAGE,
     DEFAULT_TEMPERATURE_GRADIENT_STRENGTH,
+    CurvatureNavigationParams,
     ForagingParams,
     HealthParams,
     PredatorParams,
@@ -232,6 +233,23 @@ class ForagingConfig(BaseModel):
             gradient_strength=self.gradient_strength,
             safe_zone_food_bias=self.safe_zone_food_bias,
         )
+
+
+class CurvatureNavigationConfig(BaseModel):
+    """Opt-in odor-field-curvature locomotion configuration."""
+
+    enabled: bool = False
+    use_local_gradient_state: bool = False
+    sensing_spacing: float = 1.0
+    min_speed: float = 0.2
+    max_speed: float = 1.0
+    curvature_scale: float = 0.5
+    curvature_exponent: float = 2.0
+    gradient_floor: float = 1e-6
+
+    def to_params(self) -> CurvatureNavigationParams:
+        """Convert validated YAML data to environment parameters."""
+        return CurvatureNavigationParams(**self.model_dump())
 
 
 class PredatorConfig(BaseModel):
@@ -462,6 +480,7 @@ class EnvironmentConfig(BaseModel):
     predators: PredatorConfig | None = None
     health: HealthConfig | None = None
     thermotaxis: ThermotaxisConfig | None = None
+    curvature_navigation: CurvatureNavigationConfig | None = None
 
     def get_foraging_config(self) -> ForagingConfig:
         """Get foraging configuration with defaults."""
@@ -478,6 +497,10 @@ class EnvironmentConfig(BaseModel):
     def get_thermotaxis_config(self) -> ThermotaxisConfig:
         """Get thermotaxis configuration with defaults."""
         return self.thermotaxis or ThermotaxisConfig()
+
+    def get_curvature_navigation_config(self) -> CurvatureNavigationConfig:
+        """Get curvature-navigation configuration with disabled defaults."""
+        return self.curvature_navigation or CurvatureNavigationConfig()
 
 
 # Backward compatibility alias
@@ -823,6 +846,7 @@ def create_env_from_config(
     predator_config = env_config.get_predator_config()
     health_config = env_config.get_health_config()
     thermotaxis_config = env_config.get_thermotaxis_config()
+    curvature_navigation_config = env_config.get_curvature_navigation_config()
 
     return DynamicForagingEnvironment(
         grid_size=env_config.grid_size,
@@ -834,4 +858,5 @@ def create_env_from_config(
         predator=predator_config.to_params(),
         health=health_config.to_params(),
         thermotaxis=thermotaxis_config.to_params(),
+        curvature_navigation=curvature_navigation_config.to_params(),
     )

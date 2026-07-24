@@ -166,6 +166,22 @@ class BrainParams(BaseModel):
         default=None,
         description="Predator gradient direction at agent's position (radians).",
     )
+    odor_field_streamline_curvature: float | None = Field(
+        default=None,
+        description="Signed curvature of the local food-odor gradient streamline.",
+    )
+    odor_field_level_set_curvature: float | None = Field(
+        default=None,
+        description="Signed curvature of the local food-odor level set.",
+    )
+    odor_curvature_confidence: float | None = Field(
+        default=None,
+        description="Reliability of local curvature sensing in [0, 1].",
+    )
+    locomotion_speed: float | None = Field(
+        default=None,
+        description="Curvature-modulated translational speed in grid cells per tick.",
+    )
 
     # --- Thermotaxis (temperature sensing) ---
     temperature: float | None = Field(

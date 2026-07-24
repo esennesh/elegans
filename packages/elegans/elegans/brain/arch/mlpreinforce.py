@@ -12,7 +12,7 @@ Key Features:
 - **Adaptive Learning**: Learning rate scheduling and gradient clipping for stability
 
 Architecture:
-- Input: 2D state features (gradient strength, relative direction to goal)
+- Input: 2D gradient features, optionally extended with curvature and confidence
 - Hidden: Configurable MLP layers with ReLU activation
 - Output: Action probabilities via softmax (forward, left, right, stay)
 
@@ -27,8 +27,11 @@ This approach learns policies directly but can be less sample-efficient than val
 methods like Q-learning, especially for environments with sparse or delayed rewards.
 """
 
+# pyright: reportPrivateImportUsage=false
+
 import numpy as np
 import torch  # pyright: ignore[reportMissingImports]
+from pydantic import Field
 from torch import nn, optim  # pyright: ignore[reportMissingImports]
 
 from elegans.brain.actions import DEFAULT_ACTIONS, Action, ActionData
@@ -49,6 +52,7 @@ DEFAULT_ENTROPY_BETA = 0.01
 DEFAULT_BASELINE = 0.0
 DEFAULT_BASELINE_ALPHA = 0.05
 DEFAULT_GAMMA = 0.99
+DEFAULT_CURVATURE_FEATURE_SCALE = 0.5
 
 
 class MLPReinforceBrainConfig(BrainConfig):
@@ -63,6 +67,11 @@ class MLPReinforceBrainConfig(BrainConfig):
     lr_scheduler_step_size: int = DEFAULT_LR_SCHEDULER_STEP_SIZE
     lr_scheduler_gamma: float = DEFAULT_LR_SCHEDULER_GAMMA
     num_hidden_layers: int = DEFAULT_NUM_HIDDEN_LAYERS
+    use_curvature_features: bool = False
+    curvature_feature_scale: float = Field(
+        default=DEFAULT_CURVATURE_FEATURE_SCALE,
+        gt=0.0,
+    )
 
 
 class MLPReinforceBrain(ClassicalBrain):
@@ -91,12 +100,18 @@ class MLPReinforceBrain(ClassicalBrain):
         set_global_seed(self.seed)  # Set global numpy/torch seeds
         logger.info(f"MLPReinforceBrain using seed: {self.seed}")
 
+        if config.use_curvature_features and input_dim != 4:  # noqa: PLR2004
+            message = "input_dim must be 4 when use_curvature_features=True"
+            raise ValueError(message)
+
         self.history_data = BrainHistoryData()
         self.latest_data = BrainData()
         self.input_dim = input_dim
         self.num_actions = num_actions
         self.device = torch.device(device.value)
         self.entropy_beta = config.entropy_beta
+        self.use_curvature_features = config.use_curvature_features
+        self.curvature_feature_scale = config.curvature_feature_scale
         self.policy = self._build_network(config.hidden_dim, config.num_hidden_layers).to(
             self.device,
         )
@@ -201,9 +216,14 @@ class MLPReinforceBrain(ClassicalBrain):
         -------
             np.ndarray: Preprocessed features as a numpy array.
         -----------
-        Features are:
+        The always-present features are:
             - Gradient strength (float, [0, 1])
             - Normalised relative angle to goal ([-1, 1])
+
+        When ``use_curvature_features`` is enabled, two local odor-geometry features
+        are appended:
+            - Scaled streamline curvature, ``tanh(curvature / curvature_feature_scale)``
+            - Curvature-estimate confidence in [0, 1]
         """
         # Use gradient_strength as-is (assumed [0, 1])
         grad_strength = float(params.gradient_strength or 0.0)
@@ -222,6 +242,13 @@ class MLPReinforceBrain(ClassicalBrain):
         rel_angle_norm = relative_angle / np.pi
 
         features = [grad_strength, rel_angle_norm]
+        if self.use_curvature_features:
+            streamline_curvature = float(params.odor_field_streamline_curvature or 0.0)
+            curvature_confidence = float(params.odor_curvature_confidence or 0.0)
+            normalized_curvature = float(
+                np.tanh(streamline_curvature / self.curvature_feature_scale),
+            )
+            features.extend((normalized_curvature, curvature_confidence))
         return np.array(features, dtype=np.float32)
 
     def forward(self, x: np.ndarray) -> torch.Tensor:

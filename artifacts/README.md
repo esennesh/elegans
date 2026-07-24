@@ -23,6 +23,7 @@ artifacts/
 ├── experiments/        # Simulation experiment snapshots
 │   └── <session_id>/   # e.g., 20251207_035803
 │       └── metadata.json
+├── curvature_navigation/ # Curated field-curvature figure and summary
 └── models/             # Trained model weights (future)
     └── ...
 ```

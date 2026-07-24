@@ -9,10 +9,12 @@ check if the goal is reached, and render the environment.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from enum import Enum
 from typing import ClassVar
 
 import numpy as np
+from numpy.typing import NDArray
 from pydantic.dataclasses import dataclass
 from rich import box
 from rich.console import Console
@@ -31,6 +33,13 @@ from elegans.env.theme import (
     DarkColorRichStyleConfig,
     Theme,
     ThemeSymbolSet,
+)
+from elegans.field_geometry import (
+    FieldGeometryEstimate,
+    OdorStencil,
+    curvature_controlled_speed,
+    estimate_field_geometry,
+    sample_odor_stencil,
 )
 from elegans.logging_config import logger
 from elegans.utils.seeding import ensure_seed, get_rng
@@ -112,6 +121,48 @@ class ForagingParams:
     gradient_decay_constant: float = 10.0
     gradient_strength: float = 1.0
     safe_zone_food_bias: float = 0.0
+
+
+@dataclass
+class CurvatureNavigationParams:
+    """Parameters for opt-in odor-field-curvature speed modulation.
+
+    ``max_speed`` is expressed in grid cells per simulator tick.  The discrete
+    environment realizes fractional speeds with a deterministic movement
+    accumulator, so it is intentionally limited to at most one cell per tick.
+    """
+
+    enabled: bool = False
+    use_local_gradient_state: bool = False
+    sensing_spacing: float = 1.0
+    min_speed: float = 0.2
+    max_speed: float = 1.0
+    curvature_scale: float = 0.5
+    curvature_exponent: float = 2.0
+    gradient_floor: float = 1e-6
+
+    def __post_init__(self) -> None:
+        """Validate curvature-navigation parameters."""
+        positive = {
+            "sensing_spacing": self.sensing_spacing,
+            "max_speed": self.max_speed,
+            "curvature_scale": self.curvature_scale,
+            "curvature_exponent": self.curvature_exponent,
+            "gradient_floor": self.gradient_floor,
+        }
+        for name, value in positive.items():
+            if not np.isfinite(value) or value <= 0.0:
+                msg = f"{name} must be finite and greater than zero"
+                raise ValueError(msg)
+        if self.max_speed > 1.0:
+            msg = "max_speed must be at most 1.0 cell per tick"
+            raise ValueError(msg)
+        if not np.isfinite(self.min_speed) or self.min_speed < 0.0:
+            msg = "min_speed must be finite and greater than or equal to zero"
+            raise ValueError(msg)
+        if self.min_speed > self.max_speed:
+            msg = "min_speed must be less than or equal to max_speed"
+            raise ValueError(msg)
 
 
 @dataclass
@@ -872,6 +923,7 @@ class DynamicForagingEnvironment(BaseEnvironment):
         predator: PredatorParams | None = None,
         health: HealthParams | None = None,
         thermotaxis: ThermotaxisParams | None = None,
+        curvature_navigation: CurvatureNavigationParams | None = None,
     ) -> None:
         """Initialize the dynamic foraging environment."""
         if start_pos is None:
@@ -892,6 +944,15 @@ class DynamicForagingEnvironment(BaseEnvironment):
         self.predator = predator or PredatorParams()
         self.health = health or HealthParams()
         self.thermotaxis = thermotaxis or ThermotaxisParams()
+        self.curvature_navigation = curvature_navigation or CurvatureNavigationParams()
+
+        # Curvature-navigation runtime state.  Defaults preserve the historical
+        # one-cell-per-non-STAY-action behavior exactly.
+        self.movement_accumulator: float = 0.0
+        self.last_field_geometry: FieldGeometryEstimate | None = None
+        self.last_locomotion_speed: float = 1.0
+        self.speed_pause_occurred: bool = False
+        self.translation_occurred: bool = False
 
         self.viewport_size = viewport_size
 
@@ -1148,6 +1209,99 @@ class DynamicForagingEnvironment(BaseEnvironment):
 
         return vector_x, vector_y
 
+    def get_food_concentration(
+        self,
+        position: Sequence[float] | NDArray[np.float64],
+    ) -> float:
+        """Return scalar food odor concentration at a continuous position.
+
+        Each source uses ``decay * strength * exp(-distance / decay)``.  Its
+        spatial gradient away from source centers has exactly the magnitude and
+        direction used by :meth:`_compute_food_gradient_vector`, making the new
+        scalar sensing model consistent with the historical vector field.
+        """
+        point = np.asarray(position, dtype=np.float64)
+        if point.shape != (2,) or not np.all(np.isfinite(point)):
+            msg = "position must contain two finite coordinates"
+            raise ValueError(msg)
+
+        decay = self.foraging.gradient_decay_constant
+        strength = self.foraging.gradient_strength
+        concentration = 0.0
+        for food in self.foods:
+            distance = float(np.hypot(food[0] - point[0], food[1] - point[1]))
+            concentration += decay * strength * float(np.exp(-distance / decay))
+        return concentration
+
+    def sample_food_odor_stencil(
+        self,
+        position: tuple[float, float] | None = None,
+    ) -> OdorStencil:
+        """Sense a local body-oriented 3x3 stencil of food odor values."""
+        query_position = position or (float(self.agent_pos[0]), float(self.agent_pos[1]))
+        heading_angles = {
+            Direction.UP: np.pi / 2,
+            Direction.DOWN: -np.pi / 2,
+            Direction.LEFT: np.pi,
+            Direction.RIGHT: 0.0,
+        }
+        return sample_odor_stencil(
+            self.get_food_concentration,
+            query_position,
+            heading_angles[self.current_direction],
+            self.curvature_navigation.sensing_spacing,
+        )
+
+    def sense_food_field_geometry(
+        self,
+        position: tuple[float, float] | None = None,
+    ) -> FieldGeometryEstimate:
+        """Estimate local odor-field geometry solely from the odor stencil."""
+        stencil = self.sample_food_odor_stencil(position)
+        estimate = estimate_field_geometry(
+            stencil,
+            self.curvature_navigation.gradient_floor,
+        )
+        self.last_field_geometry = estimate
+        self.last_locomotion_speed = curvature_controlled_speed(
+            estimate.streamline_curvature,
+            estimate.confidence,
+            self.curvature_navigation.min_speed,
+            self.curvature_navigation.max_speed,
+            self.curvature_navigation.curvature_scale,
+            self.curvature_navigation.curvature_exponent,
+        )
+        return estimate
+
+    def _compute_navigation_food_gradient_vector(
+        self,
+        position: tuple[int, ...],
+    ) -> tuple[float, float]:
+        """Return exact or locally sensed food gradient according to configuration."""
+        if not (
+            self.curvature_navigation.enabled and self.curvature_navigation.use_local_gradient_state
+        ):
+            return self._compute_food_gradient_vector(position)
+
+        estimate = self.sense_food_field_geometry(
+            (float(position[0]), float(position[1])),
+        )
+        gradient_forward, gradient_left = estimate.gradient
+        heading_angles = {
+            Direction.UP: np.pi / 2,
+            Direction.DOWN: -np.pi / 2,
+            Direction.LEFT: np.pi,
+            Direction.RIGHT: 0.0,
+        }
+        heading = heading_angles[self.current_direction]
+        cos_heading = float(np.cos(heading))
+        sin_heading = float(np.sin(heading))
+
+        # Transform body-frame (forward, left) components into world (x, y).
+        gradient_x = gradient_forward * cos_heading - gradient_left * sin_heading
+        gradient_y = gradient_forward * sin_heading + gradient_left * cos_heading
+        return float(gradient_x), float(gradient_y)
+
     def _compute_predator_gradient_vector(
         self,
         position: tuple[int, ...],
@@ -1237,6 +1391,40 @@ class DynamicForagingEnvironment(BaseEnvironment):
 
         return float(gradient_magnitude), float(gradient_direction)
 
+    def get_navigation_state(
+        self,
+        position: tuple[int, ...],
+        *,
+        disable_log: bool = False,
+    ) -> tuple[float, float]:
+        """Return the policy steering state using configured sensory inputs.
+
+        With local gradient state enabled, the food vector is reconstructed from
+        the same body-frame odor stencil used for curvature sensing. Predator
+        repulsion remains on the existing analytic local-vector path because the
+        simulator has no scalar predator-odor stencil; this avoids silently
+        removing avoidance information. With the option disabled this delegates
+        exactly to :meth:`get_state`.
+        """
+        if not (
+            self.curvature_navigation.enabled and self.curvature_navigation.use_local_gradient_state
+        ):
+            return self.get_state(position, disable_log=disable_log)
+
+        food_x, food_y = self._compute_navigation_food_gradient_vector(position)
+        predator_x, predator_y = self._compute_predator_gradient_vector(position)
+        total_x = food_x + predator_x
+        total_y = food_y + predator_y
+        magnitude = float(np.hypot(total_x, total_y))
+        direction = float(np.arctan2(total_y, total_x))
+        if not disable_log:
+            logger.debug(
+                "Stencil-derived navigation gradient: magnitude=%s, direction=%s",
+                magnitude,
+                direction,
+            )
+        return magnitude, direction
+
     def get_separated_gradients(
         self,
         position: tuple[int, ...],
@@ -1270,7 +1458,7 @@ class DynamicForagingEnvironment(BaseEnvironment):
             - predator_gradient_direction: Direction of local predator gradient vector (radians)
         """
         # Compute gradient vectors using helper methods
-        food_vector_x, food_vector_y = self._compute_food_gradient_vector(position)
+        food_vector_x, food_vector_y = self._compute_navigation_food_gradient_vector(position)
         predator_vector_x, predator_vector_y = self._compute_predator_gradient_vector(position)
 
         # Convert vectors to magnitude + direction (what sensors detect)
@@ -1477,16 +1665,57 @@ class DynamicForagingEnvironment(BaseEnvironment):
         action : Action
             The action to take.
         """
-        # Reset wall collision flag at start of each move
+        # Reset per-tick locomotion diagnostics.
         self.wall_collision_occurred = False
+        self.speed_pause_occurred = False
+        self.translation_occurred = False
 
-        # Check if this action would result in a wall collision BEFORE calling parent
-        # This distinguishes wall collisions from body collisions
-        if action != Action.STAY:
-            self.wall_collision_occurred = self._would_hit_wall(action)
+        if not self.curvature_navigation.enabled:
+            if action != Action.STAY:
+                self.wall_collision_occurred = self._would_hit_wall(action)
+            previous_position = self.agent_pos
+            super().move_agent(action)
+            self.translation_occurred = self.agent_pos != previous_position
+            return
 
-        # Call parent move_agent
-        super().move_agent(action)
+        if self.action_set != DEFAULT_ACTIONS:
+            error_message = (
+                f"Action set {self.action_set} is not supported. "
+                f"Only {DEFAULT_ACTIONS} are supported in this environment."
+            )
+            logger.error(error_message)
+            raise ValueError(error_message)
+
+        # A voluntary STAY neither turns nor banks movement budget.
+        if action == Action.STAY:
+            return
+
+        self.sense_food_field_geometry()
+        self.movement_accumulator += self.last_locomotion_speed
+
+        previous_direction = self.current_direction
+        intended_direction = self.DIRECTION_MAP[previous_direction][action]
+
+        # Turning remains responsive when fractional speed suppresses translation.
+        # This decouples angular response from forward locomotion speed.
+        self.current_direction = intended_direction
+        if self.movement_accumulator + 1e-12 < 1.0:
+            self.speed_pause_occurred = True
+            return
+
+        self.movement_accumulator = max(0.0, self.movement_accumulator - 1.0)
+        self.wall_collision_occurred = self._get_new_position_if_valid(intended_direction) is None
+        previous_position = self.agent_pos
+
+        # The direction has already been updated, so FORWARD performs only the
+        # pending translation.  Bypass this override to avoid accumulating twice.
+        BaseEnvironment.move_agent(self, Action.FORWARD)
+        self.translation_occurred = self.agent_pos != previous_position
+
+        # Preserve historical collision semantics: a failed physical move does
+        # not change heading.  Speed pauses above intentionally do change it.
+        if not self.translation_occurred:
+            self.current_direction = previous_direction
 
     def _would_hit_wall(self, action: Action) -> bool:
         """
@@ -2225,11 +2454,9 @@ class DynamicForagingEnvironment(BaseEnvironment):
 
         Notes
         -----
-        Config objects (ForagingParams, PredatorParams, HealthParams, ThermotaxisParams)
-        are shared between the original and copy, not deep-copied. This is intentional
-        as these are treated as immutable configuration. Runtime state (foods,
-        visited_cells, agent_hp, predator positions, thermotaxis counters) is properly
-        copied.
+        Configuration objects are shared between the original and copy, not
+        deep-copied. This is intentional as they are treated as immutable.
+        Runtime state, including fractional locomotion state, is copied.
         """
         new_env = DynamicForagingEnvironment(
             grid_size=self.grid_size,
@@ -2244,6 +2471,7 @@ class DynamicForagingEnvironment(BaseEnvironment):
             predator=self.predator,
             health=self.health,
             thermotaxis=self.thermotaxis,
+            curvature_navigation=self.curvature_navigation,
         )
         new_env.body = self.body.copy()
         new_env.current_direction = self.current_direction
@@ -2256,6 +2484,13 @@ class DynamicForagingEnvironment(BaseEnvironment):
         # Copy thermotaxis tracking state
         new_env.steps_in_comfort_zone = self.steps_in_comfort_zone
         new_env.total_thermotaxis_steps = self.total_thermotaxis_steps
+        # Copy curvature-navigation runtime state for many-worlds branching.
+        new_env.movement_accumulator = self.movement_accumulator
+        new_env.last_field_geometry = self.last_field_geometry
+        new_env.last_locomotion_speed = self.last_locomotion_speed
+        new_env.speed_pause_occurred = self.speed_pause_occurred
+        new_env.translation_occurred = self.translation_occurred
+        new_env.wall_collision_occurred = self.wall_collision_occurred
         if self.predator.enabled:
             new_env.predators = [
                 Predator(

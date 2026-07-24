@@ -312,7 +312,10 @@ class QuantumNematodeAgent:
             show_last_frame_only=show_last_frame_only,
         )
 
-    def _get_agent_position_tuple(self) -> tuple[float, float]:
+    def _get_agent_position_tuple(
+        self,
+        env: DynamicForagingEnvironment | None = None,
+    ) -> tuple[float, float]:
         """Get agent position as a 2-element float tuple.
 
         Returns
@@ -320,9 +323,10 @@ class QuantumNematodeAgent:
         tuple[float, float]
             Agent position (x, y) as floats.
         """
-        agent_pos = tuple(float(x) for x in self.env.agent_pos[:2])
+        active_env = env or self.env
+        agent_pos = tuple(float(x) for x in active_env.agent_pos[:2])
         if len(agent_pos) != 2:  # noqa: PLR2004
-            return (float(self.env.agent_pos[0]), float(self.env.agent_pos[1]))
+            return (float(active_env.agent_pos[0]), float(active_env.agent_pos[1]))
         return agent_pos  # type: ignore[return-value]
 
     def _prepare_input_data(self, gradient_strength: float) -> list[float] | None:  # noqa: ARG002
@@ -338,6 +342,8 @@ class QuantumNematodeAgent:
         gradient_strength: float,
         gradient_direction: float,
         action: ActionData | None = None,
+        *,
+        env: DynamicForagingEnvironment | None = None,
     ) -> BrainParams:
         """Create BrainParams for brain execution.
 
@@ -349,17 +355,22 @@ class QuantumNematodeAgent:
             Direction of the combined gradient (angle in radians).
         action : ActionData | None, optional
             Previous action taken, by default None.
+        env : DynamicForagingEnvironment | None, optional
+            Environment supplying sensory state. Many-worlds branches pass their
+            copied environment; standard episodes use the agent's environment.
 
         Returns
         -------
         BrainParams
             Brain parameters ready for execution.
         """
+        active_env = env or self.env
+
         # Get separated gradients for appetitive/aversive modules if configured
         separated_grads = {}
         if self.use_separated_gradients:
-            separated_grads = self.env.get_separated_gradients(
-                self.env.agent_pos,
+            separated_grads = active_env.get_separated_gradients(
+                active_env.agent_pos,
                 disable_log=True,
             )
 
@@ -375,20 +386,32 @@ class QuantumNematodeAgent:
         temperature_gradient_direction = None
         cultivation_temperature = None
 
-        boundary_contact = self.env.is_agent_at_boundary()
-        predator_contact = self.env.is_agent_in_predator_contact()
+        # Opt-in local odor-field geometry and curvature-controlled speed.
+        odor_field_streamline_curvature = None
+        odor_field_level_set_curvature = None
+        odor_curvature_confidence = None
+        locomotion_speed = None
+        if active_env.curvature_navigation.enabled:
+            geometry = active_env.sense_food_field_geometry()
+            odor_field_streamline_curvature = geometry.streamline_curvature
+            odor_field_level_set_curvature = geometry.level_set_curvature
+            odor_curvature_confidence = geometry.confidence
+            locomotion_speed = active_env.last_locomotion_speed
+
+        boundary_contact = active_env.is_agent_at_boundary()
+        predator_contact = active_env.is_agent_in_predator_contact()
         # Health state (if health system enabled)
-        if self.env.health.enabled:
-            health = self.env.agent_hp
-            max_health = self.env.health.max_hp
+        if active_env.health.enabled:
+            health = active_env.agent_hp
+            max_health = active_env.health.max_hp
         # Thermotaxis state (if thermotaxis enabled)
-        if self.env.thermotaxis.enabled:
-            temperature = self.env.get_temperature()
-            temp_gradient = self.env.get_temperature_gradient()
+        if active_env.thermotaxis.enabled:
+            temperature = active_env.get_temperature()
+            temp_gradient = active_env.get_temperature_gradient()
             if temp_gradient is not None:
                 temperature_gradient_strength = temp_gradient[0]
                 temperature_gradient_direction = temp_gradient[1]
-            cultivation_temperature = self.env.thermotaxis.cultivation_temperature
+            cultivation_temperature = active_env.thermotaxis.cultivation_temperature
 
         return BrainParams(
             # Combined gradients
@@ -399,6 +422,10 @@ class QuantumNematodeAgent:
             food_gradient_direction=separated_grads.get("food_gradient_direction"),
             predator_gradient_strength=separated_grads.get("predator_gradient_strength"),
             predator_gradient_direction=separated_grads.get("predator_gradient_direction"),
+            odor_field_streamline_curvature=odor_field_streamline_curvature,
+            odor_field_level_set_curvature=odor_field_level_set_curvature,
+            odor_curvature_confidence=odor_curvature_confidence,
+            locomotion_speed=locomotion_speed,
             # Internal state (hunger)
             satiety=self.current_satiety,
             # Health state
@@ -413,8 +440,8 @@ class QuantumNematodeAgent:
             temperature_gradient_direction=temperature_gradient_direction,
             cultivation_temperature=cultivation_temperature,
             # Agent proprioception
-            agent_position=self._get_agent_position_tuple(),
-            agent_direction=self.env.current_direction,
+            agent_position=self._get_agent_position_tuple(active_env),
+            agent_direction=active_env.current_direction,
             action=action,
         )
 
@@ -585,6 +612,7 @@ class QuantumNematodeAgent:
             predator=self.env.predator,
             health=self.env.health,
             thermotaxis=self.env.thermotaxis,
+            curvature_navigation=self.env.curvature_navigation,
             # Reproducibility: preserve seed from original environment
             seed=self.env.seed,
         )

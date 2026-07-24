@@ -1,9 +1,4 @@
-"""Run the minimal bilateral-sensing curvature taxis demonstration.
-
-The source bearing from the requested start is 19.983 degrees, so an exact 20-degree
-no-steering agent reaches the source by geometry alone.  The default comparison uses a modest
-30-degree offset to make steering necessary while preserving the requested setup otherwise.
-"""
+"""Run local field-curvature sensing and curvature-controlled locomotion."""
 
 from __future__ import annotations
 
@@ -12,9 +7,13 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from elegans.curvature_taxis import CurvatureTaxisConfig, save_demo_artifacts
+from elegans.curvature_taxis import (
+    DEFAULT_VIDEO_FPS,
+    DEFAULT_VIDEO_PLAYBACK_SPEED,
+    CurvatureTaxisConfig,
+    save_demo_artifacts,
+)
 
-DEFAULT_COMPARISON_HEADING_DEGREES = 30.0
 DEFAULT_HEADING_COUNT = 20
 
 
@@ -25,19 +24,38 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("exports/curvature_taxis"),
-        help="Directory for the figure, CSV traces, sweep, and JSON summary.",
+        help="Directory for the figure, traces, sweep, summary, and optional video.",
     )
     parser.add_argument(
         "--initial-heading-degrees",
         type=float,
-        default=DEFAULT_COMPARISON_HEADING_DEGREES,
-        help="Initial heading for the controller/baseline comparison (default: 30).",
+        default=CurvatureTaxisConfig().initial_heading_degrees,
+        help="Initial heading for the primary comparison (default: 28).",
     )
     parser.add_argument(
         "--heading-count",
         type=int,
         default=DEFAULT_HEADING_COUNT,
         help="Number of evenly spaced headings in the robustness sweep (default: 20).",
+    )
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Also render curvature_taxis_agent.mp4 from the actual adaptive trace.",
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=int,
+        default=DEFAULT_VIDEO_FPS,
+        help=f"Video frame rate (default: {DEFAULT_VIDEO_FPS}).",
+    )
+    parser.add_argument(
+        "--video-playback-speed",
+        type=float,
+        default=DEFAULT_VIDEO_PLAYBACK_SPEED,
+        help=(
+            f"Ratio of simulated time to video time (default: {DEFAULT_VIDEO_PLAYBACK_SPEED:g}x)."
+        ),
     )
     return parser.parse_args()
 
@@ -53,6 +71,9 @@ def main() -> None:
         args.output_dir,
         config,
         heading_count=args.heading_count,
+        render_video=args.video,
+        video_fps=args.video_fps,
+        video_playback_speed=args.video_playback_speed,
     )
     print(json.dumps(summary, indent=2))
 

@@ -16,7 +16,7 @@ from elegans.brain.arch import (
 )
 from elegans.brain.arch.dtypes import BrainType, DeviceType
 from elegans.logging_config import logger
-from elegans.optimizers.learning_rate import (
+from elegans.optimizers.learning_rate import (  # noqa: TC001 - public runtime annotations
     AdamLearningRate,
     ConstantLearningRate,
     DynamicLearningRate,
@@ -28,7 +28,7 @@ from elegans.utils.config_loader import (
 )
 
 
-def setup_brain_model(  # noqa: C901, PLR0912, PLR0913
+def setup_brain_model(  # noqa: C901
     brain_type: BrainType,
     brain_config: MLPReinforceBrainConfig
     | MLPPPOBrainConfig
@@ -39,7 +39,7 @@ def setup_brain_model(  # noqa: C901, PLR0912, PLR0913
     learning_rate: ConstantLearningRate
     | DynamicLearningRate
     | AdamLearningRate
-    | PerformanceBasedLearningRate,  # noqa: ARG001
+    | PerformanceBasedLearningRate,
     parameter_initializer_config: ParameterInitializerConfig,
 ) -> Brain:
     """Set up the brain model based on the specified brain type.
@@ -59,6 +59,8 @@ def setup_brain_model(  # noqa: C901, PLR0912, PLR0913
     ------
         ValueError: If an unknown brain type is provided.
     """
+    del learning_rate  # Kept in the public factory API for caller compatibility.
+
     if brain_type in (BrainType.MLP_REINFORCE, BrainType.MLP):
         from elegans.brain.arch.mlpreinforce import MLPReinforceBrain
 
@@ -72,9 +74,11 @@ def setup_brain_model(  # noqa: C901, PLR0912, PLR0913
 
         parameter_initializer = create_parameter_initializer_instance(parameter_initializer_config)
 
+        input_dim = 4 if brain_config.use_curvature_features else 2
+
         brain = MLPReinforceBrain(
             config=brain_config,
-            input_dim=2,
+            input_dim=input_dim,
             num_actions=4,
             lr_scheduler=True,
             device=device,

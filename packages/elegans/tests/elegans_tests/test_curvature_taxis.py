@@ -1,4 +1,4 @@
-"""Tests for the minimal continuous-curvature taxis demonstration."""
+"""Tests for sensed field curvature and curvature-controlled speed."""
 
 import csv
 import json
@@ -10,175 +10,346 @@ from elegans.curvature_taxis import (
     CurvatureTaxisConfig,
     CurvatureTaxisEnvironment,
     TerminationReason,
-    bilateral_curvature,
+    adaptive_speed,
+    bilateral_turn_rate,
     run_heading_sweep,
-    run_no_steering,
+    run_matched_constant_speed,
     run_taxis,
     save_demo_artifacts,
     summarize_heading_sweep,
 )
+from elegans.field_geometry import curvature_controlled_speed
 from matplotlib import image as mpimg
 
 
-def comparison_config() -> CurvatureTaxisConfig:
-    """Return the small heading offset that makes steering necessary."""
-    return replace(CurvatureTaxisConfig(), initial_heading_degrees=30.0)
+def test_field_is_non_circular_non_gaussian_and_has_unique_peak():
+    """The field is quartic, anisotropic, and maximized only at its source."""
+    field = CurvatureTaxisConfig().field()
+    source = np.asarray(field.source)
+    direction = np.array([1.0, 0.0])
+    perpendicular = np.array([0.0, 1.0])
 
-
-def test_reset_observation_contains_only_bilateral_concentrations():
-    """Reset returns exactly the two local concentrations and configured state."""
-    environment = CurvatureTaxisEnvironment()
-
-    observation = environment.reset()
-
-    assert observation.shape == (2,)
-    assert np.all((observation > 0.0) & (observation <= 1.0))
-    assert environment.position == pytest.approx((2.0, 3.0))
-    assert environment.heading == pytest.approx(np.deg2rad(20.0))
+    assert field.beta > 0.0
+    assert field.gamma > 0.0
+    assert field.concentration(source) == pytest.approx(1.0)
+    assert field.concentration(source + 1.4 * direction) != pytest.approx(
+        field.concentration(source + 1.4 * perpendicular),
+    )
+    for offset in ((0.2, 0.0), (-0.2, 0.1), (0.0, -0.2), (0.15, 0.15)):
+        assert field.concentration(source + offset) < 1.0
 
 
 @pytest.mark.parametrize(
-    ("curvature", "expected_heading_sign", "expected_y_sign"),
+    ("field_name", "invalid_value"),
     [
-        (0.0, 0, 0),
-        (1.0, 1, 1),
-        (-1.0, -1, -1),
+        ("field_beta", np.nan),
+        ("field_beta", np.inf),
+        ("field_gamma", np.nan),
+        ("field_gamma", -np.inf),
+        ("field_rotation_degrees", np.nan),
+        ("field_rotation_degrees", np.inf),
     ],
 )
-def test_fixed_curvature_has_straight_left_right_semantics(
-    curvature,
-    expected_heading_sign,
-    expected_y_sign,
-):
-    """Zero is straight, positive bends left, and negative bends right."""
-    config = replace(
-        CurvatureTaxisConfig(),
-        start=(5.0, 5.0),
-        source=(9.0, 9.0),
-        initial_heading_degrees=0.0,
-        target_radius=0.1,
+def test_config_rejects_nonfinite_field_shape_parameters(field_name, invalid_value):
+    """NaN and infinity cannot silently enter the field geometry."""
+    with pytest.raises(ValueError, match="finite"):
+        replace(CurvatureTaxisConfig(), **{field_name: invalid_value})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("beta", np.nan),
+        ("gamma", np.inf),
+        ("rotation_degrees", -np.inf),
+        ("scale_u", np.nan),
+    ],
+)
+def test_direct_field_construction_rejects_nonfinite_parameters(field_name, invalid_value):
+    """The public field class enforces the same finite-value contract."""
+    with pytest.raises(ValueError, match="finite"):
+        replace(CurvatureTaxisConfig().field(), **{field_name: invalid_value})
+
+
+def test_analytic_derivatives_match_finite_differences():
+    """Closed-form gradient and Hessian match numerical differentiation."""
+    field = CurvatureTaxisConfig().field()
+    point = np.array([4.3, 4.8])
+    gradient, hessian = field.derivatives(point)
+    spacing = 1e-4
+    axes = np.eye(2)
+    numerical_gradient = np.array(
+        [
+            (
+                field.concentration(point + spacing * axis)
+                - field.concentration(point - spacing * axis)
+            )
+            / (2.0 * spacing)
+            for axis in axes
+        ],
     )
+    numerical_hessian = np.empty((2, 2))
+    center = field.concentration(point)
+    for index, axis in enumerate(axes):
+        numerical_hessian[index, index] = (
+            field.concentration(point + spacing * axis)
+            - 2.0 * center
+            + field.concentration(point - spacing * axis)
+        ) / spacing**2
+    numerical_hessian[0, 1] = numerical_hessian[1, 0] = (
+        field.concentration(point + spacing * axes[0] + spacing * axes[1])
+        - field.concentration(point + spacing * axes[0] - spacing * axes[1])
+        - field.concentration(point - spacing * axes[0] + spacing * axes[1])
+        + field.concentration(point - spacing * axes[0] - spacing * axes[1])
+    ) / (4.0 * spacing**2)
+
+    assert gradient == pytest.approx(numerical_gradient, abs=2e-7)
+    assert hessian == pytest.approx(numerical_hessian, abs=2e-6)
+
+
+def test_observation_contains_nine_samples_and_no_reference_geometry():
+    """The controller receives only the local stencil and its derived estimate."""
+    observation = CurvatureTaxisEnvironment().reset()
+
+    sample_names = {
+        "center",
+        "forward",
+        "backward",
+        "left",
+        "right",
+        "forward_left",
+        "forward_right",
+        "backward_left",
+        "backward_right",
+    }
+    assert all(np.isfinite(getattr(observation.stencil, name)) for name in sample_names)
+    assert not hasattr(observation, "reference_geometry")
+    assert observation.geometry.gradient_magnitude > 0.0
+
+
+@pytest.mark.parametrize("point", [(2.2, 2.6), (3.5, 5.1), (5.5, 4.7), (6.4, 6.0)])
+def test_sensed_curvature_tracks_analytic_reference(point):
+    """Nine local concentrations recover both geometric curvatures."""
+    config = replace(CurvatureTaxisConfig(), start=point, initial_heading_degrees=67.0)
     environment = CurvatureTaxisEnvironment(config)
-    environment.reset()
+    sensed = environment.observe().geometry
+    reference = environment.reference_geometry()
 
-    for _ in range(20):
-        _observation, _reward, terminated, _info = environment.step(curvature)
-        assert not terminated
-
-    heading_sign = int(np.sign(environment.heading))
-    y_sign = int(np.sign(environment.position[1] - config.start[1]))
-    assert heading_sign == expected_heading_sign
-    assert y_sign == expected_y_sign
-    assert environment.position[0] > config.start[0]
+    assert sensed.streamline_curvature == pytest.approx(
+        reference.streamline_curvature,
+        abs=0.025,
+    )
+    assert sensed.level_set_curvature == pytest.approx(reference.level_set_curvature, abs=0.03)
 
 
-def test_bilateral_controller_turns_toward_stronger_sensor():
-    """The controller's curvature sign follows the stronger sensor."""
-    assert bilateral_curvature(np.array([0.6, 0.4])) > 0.0
-    assert bilateral_curvature(np.array([0.4, 0.6])) < 0.0
-    assert bilateral_curvature(np.array([0.5, 0.5])) == pytest.approx(0.0)
+def test_continuous_speed_law_is_bounded_and_decreasing():
+    """Full-confidence speed falls continuously from its upper bound."""
+    config = CurvatureTaxisConfig()
+    values = np.array(
+        [
+            curvature_controlled_speed(
+                curvature,
+                1.0,
+                config.min_speed,
+                config.max_speed,
+                config.curvature_scale,
+                config.speed_exponent,
+            )
+            for curvature in np.linspace(0.0, 2.0, 100)
+        ],
+    )
+
+    assert values[0] == pytest.approx(config.max_speed)
+    assert np.all(np.diff(values) < 0.0)
+    assert values[-1] > config.min_speed
+    half = curvature_controlled_speed(
+        config.curvature_scale,
+        1.0,
+        config.min_speed,
+        config.max_speed,
+        config.curvature_scale,
+        config.speed_exponent,
+    )
+    assert half == pytest.approx((config.min_speed + config.max_speed) / 2.0)
 
 
-def test_step_uses_curvature_as_sole_action_and_has_no_reward():
-    """Step applies the kinematic equation and does not introduce reward."""
-    environment = CurvatureTaxisEnvironment(comparison_config())
+def test_dynamics_use_reported_speed_and_turn_rate():
+    """Independent speed and angular velocity drive the two state updates."""
+    config = CurvatureTaxisConfig()
+    environment = CurvatureTaxisEnvironment(config)
+    old_position = environment.position
     old_heading = environment.heading
 
-    observation, reward, terminated, info = environment.step(1.25)
+    _observation, reward, terminated, info = environment.step(0.7, 0.19)
 
-    assert observation.shape == (2,)
     assert reward == 0.0
     assert not terminated
-    assert info["curvature"] == pytest.approx(1.25)
-    assert environment.heading - old_heading == pytest.approx(
-        environment.config.speed * 1.25 * environment.config.dt,
+    assert environment.heading - old_heading == pytest.approx(0.7 * config.dt)
+    assert np.linalg.norm(environment.position - old_position) == pytest.approx(0.19 * config.dt)
+    assert info["speed"] == pytest.approx(0.19)
+    assert info["turn_rate"] == pytest.approx(0.7)
+
+
+def test_episode_starting_inside_target_terminates_without_moving():
+    """An already satisfied initial state is not advanced by one artificial step."""
+    config = replace(
+        CurvatureTaxisConfig(),
+        start=CurvatureTaxisConfig().source,
+    )
+
+    trace = run_taxis(config)
+
+    assert trace.success
+    assert trace.termination_reason is TerminationReason.TARGET_REACHED
+    assert len(trace.snapshots) == 1
+    assert not trace.transitions
+    assert trace.snapshots[0].time == 0.0
+    assert run_matched_constant_speed(config, trace).success
+
+
+def test_controller_uses_sensed_geometry_and_bilateral_steering():
+    """Locomotion reads field geometry while steering reads bilateral odor."""
+    config = CurvatureTaxisConfig()
+    observation = CurvatureTaxisEnvironment(config).observe()
+    speed = adaptive_speed(observation, config)
+    turn_rate = bilateral_turn_rate(
+        observation,
+        max_turn_rate=config.max_turn_rate,
+        gain=config.steering_gain,
+    )
+
+    assert config.min_speed <= speed <= config.max_speed
+    expected_sign = np.sign(observation.stencil.forward_left - observation.stencil.forward_right)
+    assert np.sign(turn_rate) == expected_sign
+
+
+def test_adaptive_trace_has_varying_curvature_speed_and_inverse_association():
+    """The default run excites the intended curvature-speed relationship."""
+    trace = run_taxis(CurvatureTaxisConfig())
+
+    assert np.ptp(trace.estimated_streamline_curvatures) > 0.05
+    assert np.ptp(trace.speeds) > 0.02
+    assert np.corrcoef(np.abs(trace.estimated_streamline_curvatures), trace.speeds)[0, 1] < -0.5
+    assert np.mean(
+        trace.speeds[
+            np.abs(trace.estimated_streamline_curvatures)
+            >= np.quantile(np.abs(trace.estimated_streamline_curvatures), 0.75)
+        ],
+    ) < np.mean(
+        trace.speeds[
+            np.abs(trace.estimated_streamline_curvatures)
+            <= np.quantile(np.abs(trace.estimated_streamline_curvatures), 0.25)
+        ],
     )
 
 
-def test_episode_log_aligns_observation_action_next_observation():
-    """Every transition is aligned to its surrounding state snapshots."""
-    trace = run_taxis(comparison_config())
-
-    assert len(trace.snapshots) == len(trace.transitions) + 1
-    for index, transition in enumerate(trace.transitions):
-        current = trace.snapshots[index]
-        following = trace.snapshots[index + 1]
-        assert transition.observation == pytest.approx(
-            (current.left_concentration, current.right_concentration),
-        )
-        assert transition.next_observation == pytest.approx(
-            (following.left_concentration, following.right_concentration),
-        )
-
-
-def test_taxis_reaches_source_while_zero_curvature_baseline_misses():
-    """Bilateral steering succeeds from a heading where straight motion misses."""
-    config = comparison_config()
-
-    taxis = run_taxis(config)
-    baseline = run_no_steering(config)
-
-    assert taxis.success
-    assert taxis.termination_reason is TerminationReason.TARGET_REACHED
-    assert taxis.distances[-1] < config.target_radius
-    assert taxis.distances[-1] < taxis.distances[0]
-    assert taxis.center_concentrations[-1] > taxis.center_concentrations[0]
-    assert np.any(np.abs(taxis.curvatures) > 0.0)
-
-    assert not baseline.success
-    assert baseline.termination_reason is TerminationReason.ARENA_EXITED
-    assert np.min(baseline.distances) > config.target_radius
-
-
-def test_twenty_degree_requested_heading_is_almost_the_direct_bearing():
-    """The exact requested geometry explains why its straight baseline succeeds."""
+def test_experienced_speeds_include_confidence_and_stay_below_full_confidence_envelope():
+    """Plot points are exact policy outputs, not mislabeled envelope values."""
     config = CurvatureTaxisConfig()
-    direct_bearing = np.rad2deg(
-        np.arctan2(
-            config.source[1] - config.start[1],
-            config.source[0] - config.start[0],
+    trace = run_taxis(config)
+    for transition in trace.transitions:
+        geometry = transition.observation.geometry
+        expected = curvature_controlled_speed(
+            geometry.streamline_curvature,
+            geometry.confidence,
+            config.min_speed,
+            config.max_speed,
+            config.curvature_scale,
+            config.speed_exponent,
+        )
+        envelope = curvature_controlled_speed(
+            geometry.streamline_curvature,
+            1.0,
+            config.min_speed,
+            config.max_speed,
+            config.curvature_scale,
+            config.speed_exponent,
+        )
+        assert transition.command.speed == pytest.approx(expected)
+        assert transition.command.speed <= envelope + 1e-12
+
+
+def test_adaptive_navigation_reaches_source_and_matches_reference_well():
+    """The locally sensed controller reaches the source with accurate geometry."""
+    trace = run_taxis(CurvatureTaxisConfig())
+
+    assert trace.success
+    assert trace.termination_reason is TerminationReason.TARGET_REACHED
+    assert trace.distances[-1] < CurvatureTaxisConfig().target_radius
+    assert trace.concentrations[-1] > trace.concentrations[0]
+    error = trace.estimated_streamline_curvatures - trace.reference_streamline_curvatures
+    assert np.mean(np.abs(error)) < 0.03
+    assert (
+        np.corrcoef(trace.estimated_streamline_curvatures, trace.reference_streamline_curvatures)[
+            0,
+            1,
+        ]
+        > 0.95
+    )
+
+
+def test_matched_constant_baseline_has_same_mean_speed_and_steering_rule():
+    """The comparison changes speed timing, not mean speed or steering logic."""
+    config = CurvatureTaxisConfig()
+    adaptive = run_taxis(config)
+    constant = run_matched_constant_speed(config, adaptive)
+
+    assert np.mean(constant.speeds) == pytest.approx(np.mean(adaptive.speeds))
+    assert np.ptp(constant.speeds) == pytest.approx(0.0)
+    first = constant.transitions[0]
+    assert first.command.turn_rate == pytest.approx(
+        bilateral_turn_rate(
+            first.observation,
+            max_turn_rate=config.max_turn_rate,
+            gain=config.steering_gain,
         ),
     )
 
-    assert direct_bearing == pytest.approx(19.9831, abs=1e-4)
-    assert run_no_steering(config).success
 
-
-def test_heading_sweep_outperforms_no_steering():
-    """Taxis remains substantially more robust across initial headings."""
-    rows = run_heading_sweep(comparison_config(), count=20)
+def test_heading_sweep_and_summary_are_complete():
+    """Heading sweeps report both adaptive and matched policies."""
+    rows = run_heading_sweep(CurvatureTaxisConfig(), count=4)
     summary = summarize_heading_sweep(rows)
 
-    assert summary["taxis_successes"] >= 18
-    assert summary["baseline_successes"] <= 2
-    assert summary["taxis_success_rate"] > summary["baseline_success_rate"]
+    assert len(rows) == 4
+    assert summary["heading_count"] == 4
+    assert 0.0 <= summary["adaptive_success_rate"] <= 1.0
+    assert 0.0 <= summary["constant_success_rate"] <= 1.0
 
 
-def test_demo_artifacts_are_complete_and_readable(tmp_path):
-    """The runnable demo writes complete, decodable analysis artifacts."""
-    summary = save_demo_artifacts(tmp_path, comparison_config(), heading_count=4)
+def test_demo_artifacts_include_geometry_speed_and_aligned_next_samples(tmp_path):
+    """Saved artifacts expose every measurement needed to audit the claim."""
+    summary = save_demo_artifacts(tmp_path, CurvatureTaxisConfig(), heading_count=2)
 
-    expected_names = {
+    expected = {
         "curvature_taxis_demo.png",
-        "taxis_trace.csv",
-        "no_steering_trace.csv",
+        "adaptive_trace.csv",
+        "matched_constant_trace.csv",
         "heading_sweep.csv",
         "summary.json",
     }
-    assert {path.name for path in tmp_path.iterdir()} == expected_names
+    assert {path.name for path in tmp_path.iterdir()} == expected
     assert mpimg.imread(tmp_path / "curvature_taxis_demo.png").size > 0
-
-    with (tmp_path / "taxis_trace.csv").open(encoding="utf-8", newline="") as csv_file:
+    with (tmp_path / "adaptive_trace.csv").open(encoding="utf-8", newline="") as csv_file:
         first_row = next(csv.DictReader(csv_file))
     assert {
-        "left_concentration",
-        "right_concentration",
-        "curvature",
-        "next_left_concentration",
-        "next_right_concentration",
+        "sample_center",
+        "sample_forward_left",
+        "sample_backward_right",
+        "estimated_streamline_curvature",
+        "estimated_level_set_curvature",
+        "reference_streamline_curvature",
+        "curvature_confidence",
+        "speed",
+        "turn_rate",
+        "path_curvature",
+        "next_sample_center",
+        "next_sample_backward_right",
     } <= first_row.keys()
-
-    saved_summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
-    assert saved_summary["taxis"]["success"]
-    assert not saved_summary["no_steering"]["success"]
-    assert summary["heading_sweep"]["heading_count"] == 4
+    saved = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert saved["field"]["non_gaussian"]
+    assert saved["field"]["non_circular"]
+    assert saved["adaptive"]["success"]
+    assert saved["estimator"]["correlation"] > 0.9
+    assert saved["speed_relation"]["curvature_speed_correlation"] < 0.0
+    assert summary["heading_sweep"]["heading_count"] == 2

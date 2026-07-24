@@ -137,6 +137,25 @@ class TestAntiDitheringPenalty:
         # Only step penalty: -0.01 (no distance reward since no foods)
         assert reward == pytest.approx(-0.01)
 
+    def test_no_anti_dithering_penalty_for_curvature_speed_pause(self, default_config):
+        """An intentional fractional-speed pause is not an oscillation."""
+        env = Mock(spec=DynamicForagingEnvironment)
+        env.reached_goal.return_value = False
+        env.agent_pos = (1, 1)
+        env.get_nearest_food_distance = Mock(return_value=None)
+        env.visited_cells = {(1, 1)}
+        env.predator = Mock()
+        env.predator.enabled = False
+        env.wall_collision_occurred = False
+        env.speed_pause_occurred = True
+
+        calculator = RewardCalculator(default_config)
+        path = [(1, 1), (1, 1), (1, 1)]
+
+        reward = calculator.calculate_reward(env, path)
+
+        assert reward == pytest.approx(-0.01)
+
 
 class TestPredatorProximityPenalty:
     """Test predator proximity penalty."""

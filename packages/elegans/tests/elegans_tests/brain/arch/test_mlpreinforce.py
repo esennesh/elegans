@@ -1,5 +1,9 @@
 """Unit tests for the MLP brain architecture."""
 
+# pyright: reportPrivateImportUsage=false
+
+from typing import get_args, get_type_hints
+
 import numpy as np
 import pytest
 import torch
@@ -26,6 +30,8 @@ class TestMLPReinforceBrainConfig:
         assert config.lr_scheduler_step_size == 100
         assert config.lr_scheduler_gamma == 0.9
         assert config.num_hidden_layers == 2
+        assert not config.use_curvature_features
+        assert config.curvature_feature_scale == 0.5
 
     def test_custom_config(self):
         """Test custom configuration values."""
@@ -40,6 +46,12 @@ class TestMLPReinforceBrainConfig:
         assert config.learning_rate == 0.001
         assert config.gamma == 0.95
         assert config.num_hidden_layers == 3
+
+    @pytest.mark.parametrize("scale", [0.0, -0.1])
+    def test_curvature_feature_scale_must_be_positive(self, scale):
+        """Curvature normalization cannot use a zero or negative scale."""
+        with pytest.raises(ValueError, match="greater than 0"):
+            MLPReinforceBrainConfig(curvature_feature_scale=scale)
 
 
 class TestMLPReinforceBrain:
@@ -107,6 +119,114 @@ class TestMLPReinforceBrain:
 
         assert len(features) == 2
         assert features[0] == 0.0  # gradient_strength defaults to 0
+
+    def test_legacy_preprocess_ignores_curvature_fields(self, brain):
+        """The default policy retains its historical two-feature input exactly."""
+        params = BrainParams(
+            gradient_strength=0.8,
+            gradient_direction=np.pi / 2,
+            agent_direction=Direction.UP,
+            odor_field_streamline_curvature=3.0,
+            odor_curvature_confidence=0.75,
+        )
+
+        features = brain.preprocess(params)
+
+        assert features == pytest.approx(np.array([0.8, 0.0], dtype=np.float32))
+        assert brain.policy[0].in_features == 2
+
+    def test_curvature_features_extend_preprocessing_and_network_input(self):
+        """Opt-in policies receive bounded curvature and confidence features."""
+        config = MLPReinforceBrainConfig(
+            hidden_dim=16,
+            use_curvature_features=True,
+            curvature_feature_scale=0.5,
+        )
+        brain = MLPReinforceBrain(
+            config=config,
+            input_dim=4,
+            num_actions=4,
+            device=DeviceType.CPU,
+            lr_scheduler=False,
+        )
+        params = BrainParams(
+            gradient_strength=0.8,
+            gradient_direction=np.pi / 2,
+            agent_direction=Direction.UP,
+            odor_field_streamline_curvature=0.25,
+            odor_curvature_confidence=0.75,
+        )
+
+        features = brain.preprocess(params)
+
+        assert features == pytest.approx(
+            np.array([0.8, 0.0, np.tanh(0.5), 0.75], dtype=np.float32),
+        )
+        assert brain.input_dim == 4
+        assert brain.policy[0].in_features == 4
+        assert brain.forward(features).shape == (4,)
+
+    def test_curvature_features_default_to_zero_when_sensing_is_unavailable(self):
+        """The opt-in preprocessing path remains finite before a sensor is populated."""
+        config = MLPReinforceBrainConfig(use_curvature_features=True)
+        brain = MLPReinforceBrain(
+            config=config,
+            input_dim=4,
+            num_actions=4,
+            device=DeviceType.CPU,
+            lr_scheduler=False,
+        )
+
+        features = brain.preprocess(BrainParams())
+
+        assert features.shape == (4,)
+        assert features[2:] == pytest.approx((0.0, 0.0))
+
+    def test_constructor_rejects_input_dimension_inconsistent_with_config(self):
+        """Misconfigured models fail early instead of at their first forward pass."""
+        config = MLPReinforceBrainConfig(use_curvature_features=True)
+
+        with pytest.raises(ValueError, match="input_dim must be 4"):
+            MLPReinforceBrain(config=config, input_dim=2, num_actions=4)
+
+    def test_legacy_constructor_still_accepts_custom_input_dimension(self):
+        """Curvature opt-in must not narrow the historical constructor API."""
+        brain = MLPReinforceBrain(
+            config=MLPReinforceBrainConfig(),
+            input_dim=3,
+            num_actions=4,
+        )
+
+        assert brain.input_dim == 3
+        assert brain.policy[0].in_features == 3
+
+    def test_factory_builds_four_input_policy_when_curvature_is_enabled(self):
+        """The configured production factory derives the opt-in input dimension."""
+        from elegans.brain.arch.dtypes import BrainType
+        from elegans.optimizers.learning_rate import ConstantLearningRate
+        from elegans.utils.brain_factory import setup_brain_model
+        from elegans.utils.config_loader import ParameterInitializerConfig
+
+        brain = setup_brain_model(
+            brain_type=BrainType.MLP_REINFORCE,
+            brain_config=MLPReinforceBrainConfig(use_curvature_features=True),
+            device=DeviceType.CPU,
+            learning_rate=ConstantLearningRate(learning_rate=0.01),
+            parameter_initializer_config=ParameterInitializerConfig(),
+        )
+
+        assert isinstance(brain, MLPReinforceBrain)
+        assert brain.input_dim == 4
+        assert brain.policy[0].in_features == 4
+
+    def test_factory_type_hints_remain_runtime_resolvable(self):
+        """Public factory annotations support normal runtime introspection."""
+        from elegans.optimizers.learning_rate import ConstantLearningRate
+        from elegans.utils.brain_factory import setup_brain_model
+
+        hints = get_type_hints(setup_brain_model)
+
+        assert ConstantLearningRate in get_args(hints["learning_rate"])
 
     def test_forward(self, brain):
         """Test forward pass through the network."""

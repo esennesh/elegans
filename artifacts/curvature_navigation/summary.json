@@ -1,0 +1,117 @@
+{
+  "config": {
+    "arena_size": 10.0,
+    "source": [
+      7.7,
+      6.4
+    ],
+    "start": [
+      1.7,
+      2.1
+    ],
+    "initial_heading_degrees": 28.0,
+    "field_scale_u": 3.8,
+    "field_scale_v": 1.45,
+    "field_rotation_degrees": 31.0,
+    "field_beta": 0.035,
+    "field_gamma": 0.24,
+    "sensor_spacing": 0.16,
+    "gradient_floor": 0.0002,
+    "min_speed": 0.1,
+    "max_speed": 0.42,
+    "curvature_scale": 0.22,
+    "speed_exponent": 2.0,
+    "max_turn_rate": 1.25,
+    "steering_gain": 2.4,
+    "dt": 0.04,
+    "target_radius": 0.45,
+    "max_duration": 120.0
+  },
+  "field": {
+    "formula": "exp[-0.5(U^2+V^2)-beta*U^4-gamma*U^2*V^2]",
+    "non_gaussian": true,
+    "non_circular": true,
+    "unique_maximum": [
+      7.7,
+      6.4
+    ]
+  },
+  "adaptive": {
+    "success": true,
+    "termination_reason": "target_reached",
+    "duration": 36.95999999999939,
+    "steps": 924,
+    "initial_distance": 7.381734213584231,
+    "final_distance": 0.44788390693462976,
+    "initial_concentration": 0.07408271676779012,
+    "final_concentration": 0.9930042214882966,
+    "mean_speed": 0.19071219057019925,
+    "min_speed": 0.10149449397154292,
+    "max_speed": 0.4199983154274347
+  },
+  "matched_constant": {
+    "success": true,
+    "termination_reason": "target_reached",
+    "duration": 36.91999999999939,
+    "steps": 923,
+    "initial_distance": 7.381734213584231,
+    "final_distance": 0.442487399395291,
+    "initial_concentration": 0.07408271676779012,
+    "final_concentration": 0.9932318847948357,
+    "mean_speed": 0.1907121905701992,
+    "min_speed": 0.19071219057019925,
+    "max_speed": 0.19071219057019925
+  },
+  "no_steering": {
+    "success": false,
+    "termination_reason": "arena_exited",
+    "duration": 22.3999999999997,
+    "steps": 560,
+    "initial_distance": 7.381734213584231,
+    "final_distance": 2.3097254766459856,
+    "initial_concentration": 0.07408271676779012,
+    "final_concentration": 0.62690186201598,
+    "mean_speed": 0.42,
+    "min_speed": 0.42,
+    "max_speed": 0.42
+  },
+  "estimator": {
+    "mean_absolute_error": 0.0049588731181969305,
+    "root_mean_square_error": 0.0056897124237347465,
+    "correlation": 0.9999968544377915,
+    "estimated_min": -0.6076301944256741,
+    "estimated_max": 3.211631243777119,
+    "reference_min": -0.6138578479730811,
+    "reference_max": 3.233383278302189,
+    "mean_confidence": 0.9999954696141167
+  },
+  "speed_relation": {
+    "curvature_speed_correlation": -0.5889781579315103,
+    "low_curvature_quartile_threshold": 0.3083503718177172,
+    "high_curvature_quartile_threshold": 0.5557251419923905,
+    "low_curvature_mean_speed": 0.29556643411893424,
+    "high_curvature_mean_speed": 0.1319372090356507,
+    "speed_difference_low_minus_high": 0.16362922508328354,
+    "curvature_min": 0.00043538499805847086,
+    "curvature_max": 3.211631243777119,
+    "speed_min": 0.10149449397154292,
+    "speed_max": 0.4199983154274347
+  },
+  "heading_sweep": {
+    "heading_count": 20,
+    "adaptive_successes": 20,
+    "constant_successes": 20,
+    "adaptive_success_rate": 1.0,
+    "constant_success_rate": 1.0,
+    "median_adaptive_time_to_target": 40.039999999999324,
+    "median_constant_time_to_target": 40.299999999999315,
+    "median_adaptive_final_distance": 0.4482884047908942,
+    "median_constant_final_distance": 0.4454902126654321
+  },
+  "artifacts": {
+    "figure": "artifacts/curvature_navigation/curvature_taxis_demo.png",
+    "heading_sweep": "artifacts/curvature_navigation/heading_sweep.csv",
+    "summary": "artifacts/curvature_navigation/summary.json",
+    "video": "artifacts/curvature_navigation/curvature_taxis_agent.mp4"
+  }
+}
